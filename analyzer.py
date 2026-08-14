@@ -1,6 +1,6 @@
 import os
 import logging
-import fitz
+import pymupdf
 import json
 import gc
 import re
@@ -8,28 +8,28 @@ import time
 from pathlib import Path
 
 from PIL import Image
+import os
+import streamlit as st
 from google import genai
 from dotenv import load_dotenv
-
-
-# ============================================================
-# ENVIRONMENT
-# ============================================================
 
 load_dotenv()
 
 api_key = os.getenv("GENAI_API_KEY")
 
 if not api_key:
+    try:
+        api_key = st.secrets["GENAI_API_KEY"]
+    except Exception:
+        api_key = None
+
+if not api_key:
     raise ValueError(
-        "GENAI_API_KEY is missing. Please add it to your .env file."
+        "GENAI_API_KEY is missing. Add it to .env locally "
+        "or Streamlit Secrets when deploying."
     )
 
 client = genai.Client(api_key=api_key)
-
-print("\nAVAILABLE GEMINI MODELS:")
-for model in client.models.list():
-    print(model.name)
 
 # ============================================================
 # GEMINI MODEL
@@ -190,7 +190,7 @@ def pdf_to_jpg(
 
     try:
 
-        pdf_document = fitz.open(
+        pdf_document = pymupdf.open(
             pdf_path
         )
 
