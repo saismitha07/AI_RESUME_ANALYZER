@@ -8,40 +8,37 @@ import time
 from pathlib import Path
 
 from PIL import Image
-import os
 import streamlit as st
 from google import genai
-from dotenv import load_dotenv
 
-load_dotenv()
 
-api_key = os.getenv("GENAI_API_KEY")
+# ============================================================
+# GEMINI API CONFIGURATION
+# ============================================================
 
-if not api_key:
-    try:
-        api_key = st.secrets["GENAI_API_KEY"]
-    except Exception:
-        api_key = None
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
 
-if not api_key:
-    raise ValueError(
-        "GENAI_API_KEY is missing. Add it to .env locally "
-        "or Streamlit Secrets when deploying."
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is missing.")
+
+    api_key = str(api_key).strip()
+
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is empty.")
+
+    client = genai.Client(api_key=api_key)
+
+except Exception as e:
+    raise RuntimeError(
+        f"Gemini API configuration failed: {e}"
     )
 
-client = genai.Client(api_key=api_key)
 
 # ============================================================
 # GEMINI MODEL
 # ============================================================
 
-# Current stable model suitable for:
-# - Resume/image extraction
-# - Document parsing
-# - Structured JSON
-# - Resume/JD comparison
-#
-# Google currently lists this model as GA.
 MODEL_NAME = "gemini-3.5-flash-lite"
 
 
@@ -67,12 +64,7 @@ def generate_with_retry(
 ):
     """
     Call Gemini with automatic retry for temporary
-    503 and 429 errors.
-
-    Retry delays:
-        Attempt 1 -> 1 second
-        Attempt 2 -> 2 seconds
-        Attempt 3 -> 4 seconds
+    503, 429 and 500 errors.
     """
 
     last_error = None
@@ -101,23 +93,56 @@ def generate_with_retry(
 
             last_error = e
 
-            error_text = str(e).upper()
+            error_text = str(e)
+            error_upper = error_text.upper()
 
             logging.warning(
-                f"Gemini request failed: {e}"
+                f"Gemini request failed: {error_text}"
             )
+
+            # ------------------------------------------------
+            # INVALID API KEY
+            # ------------------------------------------------
+
+            if (
+                "API_KEY_INVALID" in error_upper
+                or "API KEY NOT VALID" in error_upper
+                or "INVALID_ARGUMENT" in error_upper
+            ):
+
+                raise RuntimeError(
+                    "Gemini API key is invalid. "
+                    "Please check GEMINI_API_KEY in "
+                    "Streamlit Secrets."
+                )
+
+            # ------------------------------------------------
+            # PERMISSION / AUTHENTICATION
+            # ------------------------------------------------
+
+            if (
+                "401" in error_upper
+                or "UNAUTHENTICATED" in error_upper
+                or "PERMISSION_DENIED" in error_upper
+            ):
+
+                raise RuntimeError(
+                    "Gemini API authentication failed. "
+                    "Please verify the API key and "
+                    "Google AI Studio configuration."
+                )
 
             # ------------------------------------------------
             # TEMPORARY ERRORS
             # ------------------------------------------------
 
             temporary_error = (
-                "503" in error_text
-                or "UNAVAILABLE" in error_text
-                or "429" in error_text
-                or "RESOURCE_EXHAUSTED" in error_text
-                or "500" in error_text
-                or "INTERNAL" in error_text
+                "503" in error_upper
+                or "UNAVAILABLE" in error_upper
+                or "429" in error_upper
+                or "RESOURCE_EXHAUSTED" in error_upper
+                or "500" in error_upper
+                or "INTERNAL" in error_upper
             )
 
             if temporary_error:
@@ -136,19 +161,17 @@ def generate_with_retry(
                     continue
 
             # ------------------------------------------------
-            # MODEL NOT FOUND / INVALID MODEL
+            # MODEL NOT FOUND
             # ------------------------------------------------
 
             if (
-                "404" in error_text
-                or "NOT_FOUND" in error_text
+                "404" in error_upper
+                or "NOT_FOUND" in error_upper
             ):
 
                 raise RuntimeError(
                     f"Gemini model '{model}' is not available "
-                    f"for this API key. "
-                    f"Please check the models available to "
-                    f"your Gemini API key."
+                    f"for this API key."
                 )
 
             # ------------------------------------------------
@@ -179,9 +202,7 @@ def pdf_to_jpg(
 
     file_paths = []
 
-    output_folder = Path(
-        output_folder
-    )
+    output_folder = Path(output_folder)
 
     output_folder.mkdir(
         parents=True,
@@ -190,9 +211,7 @@ def pdf_to_jpg(
 
     try:
 
-        pdf_document = pymupdf.open(
-            pdf_path
-        )
+        pdf_document = pymupdf.open(pdf_path)
 
         logging.info(
             f"PDF opened successfully. "
@@ -255,10 +274,6 @@ def process_image(
     Send resume image to Gemini and extract
     structured resume information.
     """
-
-    # --------------------------------------------------------
-    # VALIDATION
-    # --------------------------------------------------------
 
     if type != "image":
 
@@ -355,12 +370,9 @@ Rules:
 
         with Image.open(file_path) as img:
 
-            # Make sure image is in RGB format.
             if img.mode != "RGB":
 
-                img = img.convert(
-                    "RGB"
-                )
+                img = img.convert("RGB")
 
             # ------------------------------------------------
             # GEMINI REQUEST
@@ -400,9 +412,7 @@ Rules:
         # REMOVE MARKDOWN CODE FENCES
         # ----------------------------------------------------
 
-        if text_content.startswith(
-            "```"
-        ):
+        if text_content.startswith("```"):
 
             text_content = re.sub(
                 r"^```(?:json)?",
@@ -417,9 +427,7 @@ Rules:
                 text_content
             )
 
-            text_content = (
-                text_content.strip()
-            )
+            text_content = text_content.strip()
 
         # ----------------------------------------------------
         # PARSE JSON
@@ -433,16 +441,8 @@ Rules:
 
         except json.JSONDecodeError:
 
-            # Try to extract JSON object
-            # if Gemini returned extra text.
-
-            json_start = (
-                text_content.find("{")
-            )
-
-            json_end = (
-                text_content.rfind("}")
-            )
+            json_start = text_content.find("{")
+            json_end = text_content.rfind("}")
 
             if (
                 json_start != -1
@@ -450,12 +450,10 @@ Rules:
                 and json_end > json_start
             ):
 
-                json_text = (
-                    text_content[
-                        json_start:
-                        json_end + 1
-                    ]
-                )
+                json_text = text_content[
+                    json_start:
+                    json_end + 1
+                ]
 
                 parsed_data = json.loads(
                     json_text
@@ -479,57 +477,16 @@ Rules:
                     "Gemini returned invalid resume data."
             }
 
-        # Add missing fields safely.
-
-        parsed_data.setdefault(
-            "name",
-            ""
-        )
-
-        parsed_data.setdefault(
-            "email",
-            ""
-        )
-
-        parsed_data.setdefault(
-            "phone",
-            ""
-        )
-
-        parsed_data.setdefault(
-            "summary",
-            ""
-        )
-
-        parsed_data.setdefault(
-            "skills",
-            []
-        )
-
-        parsed_data.setdefault(
-            "certifications",
-            []
-        )
-
-        parsed_data.setdefault(
-            "education",
-            []
-        )
-
-        parsed_data.setdefault(
-            "experience",
-            []
-        )
-
-        parsed_data.setdefault(
-            "projects",
-            []
-        )
-
-        parsed_data.setdefault(
-            "achievements",
-            []
-        )
+        parsed_data.setdefault("name", "")
+        parsed_data.setdefault("email", "")
+        parsed_data.setdefault("phone", "")
+        parsed_data.setdefault("summary", "")
+        parsed_data.setdefault("skills", [])
+        parsed_data.setdefault("certifications", [])
+        parsed_data.setdefault("education", [])
+        parsed_data.setdefault("experience", [])
+        parsed_data.setdefault("projects", [])
+        parsed_data.setdefault("achievements", [])
 
         # ----------------------------------------------------
         # SAVE EXTRACTED RESUME
@@ -569,8 +526,7 @@ Rules:
                 "Gemini returned invalid JSON.",
             "raw_response":
                 text_content
-                if "text_content"
-                in locals()
+                if "text_content" in locals()
                 else ""
         }
 
@@ -585,17 +541,45 @@ Rules:
         )
 
         error_text = str(e)
+        error_upper = error_text.upper()
 
-        error_upper = (
-            error_text.upper()
-        )
-
-        # 503
+        # ----------------------------------------------------
+        # API KEY
+        # ----------------------------------------------------
 
         if (
+            "API_KEY_INVALID" in error_upper
+            or "API KEY NOT VALID" in error_upper
+        ):
+
+            error_message = (
+                "Gemini API key is invalid. "
+                "Please check GEMINI_API_KEY "
+                "in Streamlit Secrets."
+            )
+
+        # ----------------------------------------------------
+        # AUTHENTICATION
+        # ----------------------------------------------------
+
+        elif (
+            "401" in error_upper
+            or "UNAUTHENTICATED" in error_upper
+            or "PERMISSION_DENIED" in error_upper
+        ):
+
+            error_message = (
+                "Gemini API authentication failed. "
+                "Please verify your API key."
+            )
+
+        # ----------------------------------------------------
+        # 503
+        # ----------------------------------------------------
+
+        elif (
             "503" in error_upper
-            or "UNAVAILABLE"
-            in error_upper
+            or "UNAVAILABLE" in error_upper
         ):
 
             error_message = (
@@ -606,12 +590,13 @@ Rules:
                 "a little and try again."
             )
 
+        # ----------------------------------------------------
         # 429
+        # ----------------------------------------------------
 
         elif (
             "429" in error_upper
-            or "RESOURCE_EXHAUSTED"
-            in error_upper
+            or "RESOURCE_EXHAUSTED" in error_upper
         ):
 
             error_message = (
@@ -620,22 +605,20 @@ Rules:
                 "try again."
             )
 
+        # ----------------------------------------------------
         # 404
+        # ----------------------------------------------------
 
         elif (
             "404" in error_upper
-            or "NOT_FOUND"
-            in error_upper
+            or "NOT_FOUND" in error_upper
         ):
 
             error_message = (
                 f"The Gemini model "
                 f"'{MODEL_NAME}' is not available "
-                f"for this API key. Please check "
-                f"your available Gemini models."
+                f"for this API key."
             )
-
-        # Other
 
         else:
 
@@ -655,17 +638,12 @@ Rules:
 # ============================================================
 
 def normalize_text(text):
-    """
-    Normalize text for keyword matching.
-    """
 
     if not text:
 
         return ""
 
-    text = str(
-        text
-    ).lower()
+    text = str(text).lower()
 
     text = text.replace(
         "&",
@@ -693,13 +671,9 @@ def normalize_text(text):
 
 SKILL_ALIASES = {
 
-    "python": [
-        "python"
-    ],
+    "python": ["python"],
 
-    "java": [
-        "java"
-    ],
+    "java": ["java"],
 
     "javascript": [
         "javascript",
@@ -745,33 +719,21 @@ SKILL_ALIASES = {
         "node"
     ],
 
-    "flask": [
-        "flask"
-    ],
+    "flask": ["flask"],
 
-    "django": [
-        "django"
-    ],
+    "django": ["django"],
 
-    "fastapi": [
-        "fastapi"
-    ],
+    "fastapi": ["fastapi"],
 
     "spring boot": [
         "spring boot"
     ],
 
-    "git": [
-        "git"
-    ],
+    "git": ["git"],
 
-    "github": [
-        "github"
-    ],
+    "github": ["github"],
 
-    "docker": [
-        "docker"
-    ],
+    "docker": ["docker"],
 
     "kubernetes": [
         "kubernetes",
@@ -783,9 +745,7 @@ SKILL_ALIASES = {
         "amazon web services"
     ],
 
-    "azure": [
-        "azure"
-    ],
+    "azure": ["azure"],
 
     "gcp": [
         "gcp",
@@ -812,37 +772,21 @@ SKILL_ALIASES = {
         "gen ai"
     ],
 
-    "openai": [
-        "openai"
-    ],
+    "openai": ["openai"],
 
-    "gemini": [
-        "gemini"
-    ],
+    "gemini": ["gemini"],
 
-    "langchain": [
-        "langchain"
-    ],
+    "langchain": ["langchain"],
 
-    "tensorflow": [
-        "tensorflow"
-    ],
+    "tensorflow": ["tensorflow"],
 
-    "pytorch": [
-        "pytorch"
-    ],
+    "pytorch": ["pytorch"],
 
-    "opencv": [
-        "opencv"
-    ],
+    "opencv": ["opencv"],
 
-    "pandas": [
-        "pandas"
-    ],
+    "pandas": ["pandas"],
 
-    "numpy": [
-        "numpy"
-    ],
+    "numpy": ["numpy"],
 
     "scikit-learn": [
         "scikit-learn",
@@ -859,9 +803,7 @@ SKILL_ALIASES = {
         "algorithm"
     ],
 
-    "dsa": [
-        "dsa"
-    ],
+    "dsa": ["dsa"],
 
     "object oriented programming": [
         "object oriented programming",
@@ -892,13 +834,9 @@ SKILL_ALIASES = {
         "api development"
     ],
 
-    "power bi": [
-        "power bi"
-    ],
+    "power bi": ["power bi"],
 
-    "tableau": [
-        "tableau"
-    ],
+    "tableau": ["tableau"],
 
     "excel": [
         "excel",
@@ -911,9 +849,7 @@ SKILL_ALIASES = {
 # RESUME -> TEXT
 # ============================================================
 
-def resume_to_text(
-    resume_data
-):
+def resume_to_text(resume_data):
 
     parts = []
 
@@ -923,10 +859,6 @@ def resume_to_text(
     ):
 
         return ""
-
-    # --------------------------------------------------------
-    # SIMPLE FIELDS
-    # --------------------------------------------------------
 
     for key in [
         "name",
@@ -943,10 +875,6 @@ def resume_to_text(
             parts.append(
                 str(value)
             )
-
-    # --------------------------------------------------------
-    # LIST FIELDS
-    # --------------------------------------------------------
 
     for key in [
         "skills",
@@ -992,9 +920,7 @@ def resume_to_text(
                 str(value)
             )
 
-    return "\n".join(
-        parts
-    )
+    return "\n".join(parts)
 
 
 # ============================================================
@@ -1006,42 +932,30 @@ def keyword_match(
     job_description
 ):
 
-    resume_text_normalized = (
-        normalize_text(
-            resume_text
-        )
+    resume_text_normalized = normalize_text(
+        resume_text
     )
 
-    job_text_normalized = (
-        normalize_text(
-            job_description
-        )
+    job_text_normalized = normalize_text(
+        job_description
     )
 
     matching_skills = []
-
     missing_skills = []
 
-    for skill, aliases in (
-        SKILL_ALIASES.items()
-    ):
+    for skill, aliases in SKILL_ALIASES.items():
 
         job_has_skill = any(
-            normalize_text(
-                alias
-            )
+            normalize_text(alias)
             in job_text_normalized
             for alias in aliases
         )
 
         if not job_has_skill:
-
             continue
 
         resume_has_skill = any(
-            normalize_text(
-                alias
-            )
+            normalize_text(alias)
             in resume_text_normalized
             for alias in aliases
         )
@@ -1067,12 +981,9 @@ def keyword_match(
 
         keyword_score = round(
             (
-                len(
-                    matching_skills
-                )
+                len(matching_skills)
                 / total_required
-            )
-            * 100
+            ) * 100
         )
 
     else:
@@ -1101,10 +1012,8 @@ def gemini_resume_match(
     job_description
 ):
 
-    resume_text = (
-        resume_to_text(
-            resume_data
-        )
+    resume_text = resume_to_text(
+        resume_data
     )
 
     prompt = f"""
@@ -1180,11 +1089,9 @@ Rules:
 
     try:
 
-        response = (
-            generate_with_retry(
-                model=MODEL_NAME,
-                contents=prompt
-            )
+        response = generate_with_retry(
+            model=MODEL_NAME,
+            contents=prompt
         )
 
         text = (
@@ -1200,13 +1107,7 @@ Rules:
                     "Gemini returned an empty response."
             }
 
-        # ----------------------------------------------------
-        # REMOVE CODE FENCES
-        # ----------------------------------------------------
-
-        if text.startswith(
-            "```"
-        ):
+        if text.startswith("```"):
 
             text = re.sub(
                 r"^```(?:json)?",
@@ -1223,25 +1124,14 @@ Rules:
 
             text = text.strip()
 
-        # ----------------------------------------------------
-        # PARSE JSON
-        # ----------------------------------------------------
-
         try:
 
-            result = json.loads(
-                text
-            )
+            result = json.loads(text)
 
         except json.JSONDecodeError:
 
-            json_start = (
-                text.find("{")
-            )
-
-            json_end = (
-                text.rfind("}")
-            )
+            json_start = text.find("{")
+            json_end = text.rfind("}")
 
             if (
                 json_start != -1
@@ -1280,15 +1170,22 @@ Rules:
         )
 
         error_text = str(e)
-
-        error_upper = (
-            error_text.upper()
-        )
+        error_upper = error_text.upper()
 
         if (
+            "API_KEY_INVALID" in error_upper
+            or "API KEY NOT VALID" in error_upper
+        ):
+
+            error_message = (
+                "Gemini API key is invalid. "
+                "Please check GEMINI_API_KEY "
+                "in Streamlit Secrets."
+            )
+
+        elif (
             "503" in error_upper
-            or "UNAVAILABLE"
-            in error_upper
+            or "UNAVAILABLE" in error_upper
         ):
 
             error_message = (
@@ -1299,8 +1196,7 @@ Rules:
 
         elif (
             "429" in error_upper
-            or "RESOURCE_EXHAUSTED"
-            in error_upper
+            or "RESOURCE_EXHAUSTED" in error_upper
         ):
 
             error_message = (
@@ -1311,8 +1207,7 @@ Rules:
 
         elif (
             "404" in error_upper
-            or "NOT_FOUND"
-            in error_upper
+            or "NOT_FOUND" in error_upper
         ):
 
             error_message = (
@@ -1326,8 +1221,7 @@ Rules:
             error_message = error_text
 
         return {
-            "error":
-                error_message
+            "error": error_message
         }
 
 
@@ -1339,15 +1233,6 @@ def analyze_resume_against_job(
     resume_data,
     job_description
 ):
-    """
-    Complete matching pipeline.
-
-    1. Keyword matching
-    2. Gemini semantic comparison
-    3. Combined final score
-    4. Missing skills
-    5. Suggestions
-    """
 
     if (
         not job_description
@@ -1366,42 +1251,31 @@ def analyze_resume_against_job(
                 "Resume data is empty."
         }
 
-    resume_text = (
-        resume_to_text(
-            resume_data
-        )
+    resume_text = resume_to_text(
+        resume_data
     )
 
     # --------------------------------------------------------
     # KEYWORD ANALYSIS
     # --------------------------------------------------------
 
-    keyword_result = (
-        keyword_match(
-            resume_text,
-            job_description
-        )
+    keyword_result = keyword_match(
+        resume_text,
+        job_description
     )
 
-    keyword_score = (
-        keyword_result[
-            "keyword_score"
-        ]
-    )
+    keyword_score = keyword_result[
+        "keyword_score"
+    ]
 
     # --------------------------------------------------------
     # GEMINI ANALYSIS
     # --------------------------------------------------------
 
-    ai_result = (
-        gemini_resume_match(
-            resume_data,
-            job_description
-        )
+    ai_result = gemini_resume_match(
+        resume_data,
+        job_description
     )
-
-    # If Gemini comparison fails,
-    # don't create a misleading result.
 
     if "error" in ai_result:
 
@@ -1425,21 +1299,17 @@ def analyze_resume_against_job(
 
         overall_score = round(
             (
-                keyword_score
-                * 0.40
+                keyword_score * 0.40
             )
             +
             (
-                ai_score
-                * 0.60
+                ai_score * 0.60
             )
         )
 
     else:
 
-        overall_score = (
-            keyword_score
-        )
+        overall_score = keyword_score
 
     # --------------------------------------------------------
     # COMBINE SKILLS
@@ -1515,9 +1385,7 @@ def analyze_resume_against_job(
             "or experience."
         )
 
-    if not resume_data.get(
-        "experience"
-    ):
+    if not resume_data.get("experience"):
 
         suggestions.append(
             "If you have internships, work "
@@ -1526,9 +1394,7 @@ def analyze_resume_against_job(
             "add them to the resume."
         )
 
-    if not resume_data.get(
-        "projects"
-    ):
+    if not resume_data.get("projects"):
 
         suggestions.append(
             "Add 2-3 relevant technical projects "
@@ -1540,11 +1406,9 @@ def analyze_resume_against_job(
     # SUMMARY
     # --------------------------------------------------------
 
-    ai_summary = (
-        ai_result.get(
-            "summary",
-            ""
-        )
+    ai_summary = ai_result.get(
+        "summary",
+        ""
     )
 
     if not ai_summary:
