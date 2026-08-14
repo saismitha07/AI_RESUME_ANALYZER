@@ -5,4 +5,4 @@ __pycache__/
 app.log
 pdf_images/
 analysis_result.json
-result.json
+result.json.streamlit/secrets.toml
